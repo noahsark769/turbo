@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     ops::{Deref, DerefMut},
     path::Path,
@@ -8,6 +8,7 @@ use std::{
 use camino::Utf8Path;
 use serde::{Deserialize, Serialize};
 use struct_iterable::Iterable;
+use tracing::debug;
 use turbopath::{AbsoluteSystemPath, RelativeUnixPathBuf};
 use turborepo_errors::Spanned;
 use turborepo_repository::{package_graph::ROOT_PKG_NAME, package_json::PackageJson};
@@ -15,7 +16,10 @@ use turborepo_repository::{package_graph::ROOT_PKG_NAME, package_json::PackageJs
 use crate::{
     cli::OutputLogsMode,
     config::{ConfigurationOptions, Error},
-    run::task_id::{TaskId, TaskName},
+    run::{
+        task_access::{TaskAccessTraceFile, TASK_ACCESS_CONFIG_PATH},
+        task_id::{TaskId, TaskName},
+    },
     task_graph::{TaskDefinition, TaskOutputs},
     unescape::UnescapedString,
 };
@@ -36,7 +40,7 @@ pub struct SpacesJson {
 // turbo.json files into a single definition. Therefore we keep the
 // `RawTaskDefinition` type so we can determine which fields are actually
 // set when we resolve the configuration.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone, PartialEq, Serialize)]
 pub struct TurboJson {
     pub(crate) extends: Spanned<Vec<String>>,
     pub(crate) global_deps: Spanned<Vec<String>>,
@@ -347,6 +351,35 @@ impl RawTurboJson {
 
         this
     }
+
+    pub fn from_task_access_trace(trace: &HashMap<String, TaskAccessTraceFile>) -> Option<Self> {
+        if trace.is_empty() {
+            return None;
+        }
+
+        let mut pipeline = Pipeline::default();
+
+        for (task_name, trace_file) in trace {
+            let mut task_definition = RawTaskDefinition::default();
+            task_definition.outputs = Some(Spanned::new(trace_file.outputs.clone()));
+            task_definition.env = Some(
+                trace_file
+                    .accessed
+                    .env_var_keys
+                    .iter()
+                    .map(|unescaped_string| Spanned::new(unescaped_string.clone()))
+                    .collect(),
+            );
+            let name = TaskName::from(task_name.as_str());
+            let root_task = name.into_root_task();
+            pipeline.insert(root_task, task_definition);
+        }
+
+        Some(RawTurboJson {
+            pipeline: Some(pipeline),
+            ..RawTurboJson::default()
+        })
+    }
 }
 
 impl TryFrom<RawTurboJson> for TurboJson {
@@ -471,6 +504,15 @@ impl TurboJson {
         }
 
         let turbo_from_files = Self::read(&dir.join_component(CONFIG_FILE));
+        let turbo_from_trace = Self::read(&dir.join_components(&TASK_ACCESS_CONFIG_PATH));
+
+        // check the zero config case (turbo trace file, but no turbo.json file)
+        if let Ok(turbo_from_trace) = turbo_from_trace {
+            if turbo_from_files.is_err() {
+                debug!("Using turbo.json synthesized from trace file");
+                return Ok(turbo_from_trace);
+            }
+        }
 
         let mut turbo_json = match (include_synthesized_from_root_package_json, turbo_from_files) {
             // If the file didn't exist, throw a custom error here instead of propagating
