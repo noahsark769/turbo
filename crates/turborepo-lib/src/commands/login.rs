@@ -25,7 +25,8 @@ pub async fn sso_login(
         sso_team,
         &DefaultSSOLoginServer,
     )
-    .await?;
+    .await?
+    .token;
 
     let global_config_path = base.global_config_path()?;
     let before = global_config_path

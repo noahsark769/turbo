@@ -10,6 +10,8 @@ use turborepo_ui::{BOLD, UI};
 
 use crate::{ui, LoginServer};
 
+use crate::Token;
+
 const VERCEL_TOKEN_DIR: &str = "com.vercel.cli";
 const VERCEL_TOKEN_FILE: &str = "auth.json";
 

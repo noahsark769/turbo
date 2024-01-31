@@ -1,4 +1,4 @@
-use std::{borrow::Cow, sync::Arc};
+use std::sync::Arc;
 
 use reqwest::Url;
 use tokio::sync::OnceCell;
@@ -6,11 +6,13 @@ use tracing::warn;
 use turborepo_api_client::Client;
 use turborepo_ui::{start_spinner, BOLD, UI};
 
-use crate::{error, server, ui, Error};
+use crate::{error, server, ui, Error, Token};
 
 const DEFAULT_HOST_NAME: &str = "127.0.0.1";
 const DEFAULT_PORT: u16 = 9789;
 const DEFAULT_SSO_PROVIDER: &str = "SAML/OIDC Single Sign-On";
+const VERCEL_CONFIG_DIR: &str = "com.vercel.cli";
+const VERCEL_TOKEN_FILE: &str = "auth.json";
 
 fn make_token_name() -> Result<String, Error> {
     let host = hostname::get().map_err(Error::FailedToMakeSSOTokenName)?;
@@ -21,8 +23,9 @@ fn make_token_name() -> Result<String, Error> {
     ))
 }
 
-/// present, and the token has access to the provided `sso_team`, we do not
-/// overwrite it and instead log that we found an existing token.
+/// Perform an SSO login flow. If an existing token is present, and the token
+/// has access to the provided `sso_team`, we do not overwrite it and instead
+/// log that we found an existing token.
 pub async fn sso_login<'a>(
     api_client: &impl Client,
     ui: &UI,
@@ -30,7 +33,7 @@ pub async fn sso_login<'a>(
     login_url_configuration: &str,
     sso_team: &str,
     login_server: &impl server::SSOLoginServer,
-) -> Result<Cow<'a, str>, Error> {
+) -> Result<Token, Error> {
     // Check if token exists first. Must be there for the user and contain the
     // sso_team passed into this function.
     if let Some(token) = existing_token {
@@ -45,7 +48,40 @@ pub async fn sso_login<'a>(
             {
                 println!("{}", ui.apply(BOLD.apply_to("Existing token found!")));
                 ui::print_cli_authorized(&response_user.user.email, ui);
-                return Ok(token.into());
+                return Ok(Token {
+                    token: token.into(),
+                    is_existing: true,
+                });
+            }
+        }
+    }
+
+    // No existing token found. If the user is logging into Vercel, check for an
+    // existing `vc` token with correct scope.
+    if login_url_configuration.contains("vercel.com") {
+        if let Some(vercel_config_dir) = turborepo_dirs::vercel_config_dir() {
+            let vercel_token_path = vercel_config_dir
+                .join(VERCEL_CONFIG_DIR)
+                .join(VERCEL_TOKEN_FILE);
+            #[derive(serde::Deserialize)]
+            struct VercelToken {
+                token: String,
+            }
+            let contents = std::fs::read_to_string(&vercel_token_path)?;
+            if let Ok(token) = serde_json::from_str::<VercelToken>(&contents) {
+                // extract the actual token out of the struct
+                let token = token.token;
+                if let Ok(response) = api_client.get_user(&token).await {
+                    println!(
+                        "{}",
+                        ui.apply(BOLD.apply_to("Existing Vercel token found!"))
+                    );
+                    ui::print_cli_authorized(&response.user.email, ui);
+                    return Ok(Token {
+                        token,
+                        is_existing: true,
+                    });
+                }
             }
         }
     }
@@ -95,7 +131,10 @@ pub async fn sso_login<'a>(
 
     ui::print_cli_authorized(&user_response.user.email, ui);
 
-    Ok(verified_user.token.into())
+    Ok(Token {
+        token: verified_user.token,
+        is_existing: false,
+    })
 }
 
 #[cfg(test)]
@@ -307,9 +346,10 @@ mod tests {
 
         let token = sso_login(&api_client, &ui, None, &url, team, &login_server)
             .await
-            .unwrap();
+            .unwrap()
+            .token;
 
-        let got_token = Some(token.to_string());
+        let got_token = Some(token);
 
         assert_eq!(got_token, Some(EXPECTED_VERIFICATION_TOKEN.to_owned()));
 
@@ -326,9 +366,7 @@ mod tests {
         .await
         .unwrap();
 
-        // We can confirm that we didn't fetch a new token because we're borrowing the
-        // existing token and not getting a new allocation.
-        assert!(second_token.is_borrowed());
+        assert!(second_token.is_existing);
 
         handle.abort();
 
