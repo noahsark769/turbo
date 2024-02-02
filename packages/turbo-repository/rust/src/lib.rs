@@ -38,6 +38,16 @@ impl Package {
             absolute_path: package_path.to_string(),
         }
     }
+
+    // TODO: implement this
+    fn dependencies(&self) -> Vec<Package> {
+        vec![]
+    }
+
+    // TODO: implement this
+    fn dependents(&self) -> Vec<Package> {
+        vec![]
+    }
 }
 
 impl From<RustPackageManager> for PackageManager {
@@ -70,5 +80,18 @@ impl Workspace {
     #[napi]
     pub async fn find_packages(&self) -> std::result::Result<Vec<Package>, napi::Error> {
         self.packages_internal().await.map_err(|e| e.into())
+    }
+
+    // TODO: implement this
+    #[napi]
+    pub async fn affected_packages(&self, files: Vec<String>) -> Vec<Package> {
+        // Files should be relative paths from the Workspace root.
+
+        // Make a Set
+        // For each files, find the package it belongs to, and add it to the set
+        //      Log files that don't belong to any packages
+        // For each package, add all its dependents to the set
+        // Convert the set into a Vec<Package> type.
+        vec![]
     }
 }
